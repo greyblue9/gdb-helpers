@@ -13,6 +13,75 @@ def find_var(frame, name):
         if block.function:
             return None
         block = block.superblock
+        
+def find_type(frame, type_tag):
+    block = frame.block()
+    while block is not None:
+        for sym in block:
+            # quick heuristic to avoid a deep type comparison
+            #if type_tag not in str(sym.type):
+            #    continue
+            if not (sym.is_valid and (sym.is_argument or sym.is_variable)):
+                continue
+            tags = all_type_tags(sym.type)
+            if type_tag in tags[0]:
+                v = sym.value(frame)
+                for op in tags[1]:
+                    v = op(v)
+                yield v
+        if block.function:
+            pass
+        block = block.superblock
+
+def all_type_tags(gdb_type: gdb.Type, names=None, ops=None,seen=None) -> set:
+  name_list = list(names or []) if isinstance(names, set) else names or []
+  seen = seen or set([])
+  ops = ops or []
+  prev_type = None
+  
+  while prev_type != gdb_type:
+    prev_type = gdb_type
+    gdb_type = gdb_type.unqualified()
+    if str(gdb_type) in seen:
+        break
+    seen.add(str(gdb_type))
+    if gdb_type.tag is not None:
+      print(" .. : <tag=%s>" %str(gdb_type.tag))
+      name_list.append(gdb_type.tag)
+    if gdb_type.name is not None:
+      print(" .. : <name=%s>" % str(gdb_type.name))
+      name_list.append(gdb_type.name)
+
+    if gdb_type.code in \
+       (gdb.TYPE_CODE_PTR, gdb.TYPE_CODE_REF, gdb.TYPE_CODE_RVALUE_REF,
+        gdb.TYPE_CODE_ARRAY):
+        print(" .. [%s].target() -> %s" % (str(gdb_type), 
+          str(gdb_type.target())))
+        gdb_type = gdb_type.target()
+        ops.append(gdb.Value.referenced_value)
+        
+    elif gdb_type.code in \
+      (gdb.TYPE_CODE_UNION, gdb.TYPE_CODE_STRUCT):
+        next_base = next = None
+        for field in gdb_type.fields():
+            if field.type in (prev_type, gdb_type, None if prev_type is None else prev_type.pointer(), gdb_type.pointer()):
+                continue
+            if field.is_base_class:
+                print(
+                  f"   [%s].{field.name} ***BASE_CLASS*** {str(field.type)}"\
+                    % (str(field.parent_type)))
+            all_type_tags(field.type, names=name_list,
+              ops=(ops + [
+                (lambda v: v.cast(field.parent_type)[field])
+              ]), seen=seen)
+            
+    elif gdb_type.code == gdb.TYPE_CODE_TYPEDEF:
+        print(" [%s] typedef -> %s" % (str(gdb_type), 
+          str(gdb_type.strip_typedefs())))
+        ops.append(lambda v: v.cast(v.type.strip_typedefs()))
+        gdb_type = gdb_type.strip_typedefs()
+  return (set(name_list), ops)
+
 
 class Upvar(gdb.Function):
     """$_upvar - find a variable somewhere up the stack
